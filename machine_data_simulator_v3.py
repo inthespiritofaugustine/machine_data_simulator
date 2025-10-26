@@ -94,10 +94,11 @@ class DataItem:
 class TCPStreamServer:
     """TCP server that streams data to connected clients"""
     
-    def __init__(self, host: str = "0.0.0.0", port: int = 5000, protocol: str = "json"):
+    def __init__(self, host: str = "0.0.0.0", port: int = 5000, protocol: str = "json", simple_streaming: bool = False):
         self.host = host
         self.port = port
         self.protocol = protocol
+        self.simple_streaming = simple_streaming
         self.server_socket = None
         self.clients = []
         self.running = False
@@ -138,8 +139,10 @@ class TCPStreamServer:
     
     def broadcast(self, data: Dict):
         """Broadcast data to all connected clients"""
-        # Format message based on protocol
-        if self.protocol == "csv":
+        # Format message based on protocol and streaming mode
+        if self.simple_streaming:
+            message = self._format_simple(data)
+        elif self.protocol == "csv":
             message = self._format_csv(data)
         else:  # json
             message = json.dumps(data) + "\n"
@@ -154,8 +157,8 @@ class TCPStreamServer:
             disconnected = []
             for client_socket, address in self.clients:
                 try:
-                    # Send CSV header if this is a new client and protocol is CSV
-                    if self.protocol == "csv" and address not in self.csv_header_sent:
+                    # Send CSV header if this is a new client and protocol is CSV (not simple streaming)
+                    if self.protocol == "csv" and not self.simple_streaming and address not in self.csv_header_sent:
                         header = self._get_csv_header(data)
                         client_socket.sendall(header.encode('utf-8'))
                         self.csv_header_sent[address] = True
@@ -202,7 +205,23 @@ class TCPStreamServer:
                     values.append(str(value))
         
         return ",".join(values) + "\n"
-    
+
+    def _format_simple(self, data: Dict) -> str:
+        """Format data as simple comma-delimited values only"""
+        values = []
+
+        if "data" in data:
+            # Sort keys to ensure consistent order
+            for key in sorted(data["data"].keys()):
+                value = data["data"][key]
+                # Handle boolean and string values
+                if isinstance(value, bool):
+                    values.append(str(value).lower())
+                else:
+                    values.append(str(value))
+
+        return ",".join(values) + "\n"
+
     def stop(self):
         """Stop the TCP server"""
         self.running = False
@@ -244,7 +263,8 @@ class MachineDataSimulatorApp:
         self.stream_thread = None
         self.update_interval = 1.0  # seconds
         self.last_message = ""  # Store last message for preview
-        
+        self.simple_streaming = False  # Simple streaming mode flag
+
         self.setup_ui()
         
     def setup_ui(self):
@@ -296,14 +316,21 @@ class MachineDataSimulatorApp:
         # Protocol Selection
         ttk.Label(config_frame, text="Protocol:").grid(row=0, column=6, sticky=tk.W, padx=(20, 0))
         self.protocol_var = tk.StringVar(value="json")
-        protocol_combo = ttk.Combobox(config_frame, textvariable=self.protocol_var, 
+        protocol_combo = ttk.Combobox(config_frame, textvariable=self.protocol_var,
                                        values=["json", "csv"], width=8, state="readonly")
         protocol_combo.grid(row=0, column=7, padx=5)
         protocol_combo.bind('<<ComboboxSelected>>', self.on_protocol_change)
-        
+
+        # Simple Streaming Checkbox
+        self.simple_streaming_var = tk.BooleanVar(value=False)
+        simple_check = ttk.Checkbutton(config_frame, text="Simple Streaming",
+                                        variable=self.simple_streaming_var,
+                                        command=self.on_simple_streaming_toggle)
+        simple_check.grid(row=0, column=8, padx=(20, 0))
+
         # Start/Stop Button
         self.start_button = ttk.Button(config_frame, text="Start Streaming", command=self.toggle_streaming)
-        self.start_button.grid(row=0, column=8, padx=(20, 0))
+        self.start_button.grid(row=0, column=9, padx=(20, 0))
         
         # Row 1 - Machine ID
         ttk.Label(config_frame, text="Machine ID:").grid(row=1, column=0, sticky=tk.W, pady=(10, 0))
@@ -325,6 +352,14 @@ class MachineDataSimulatorApp:
             if self.tcp_server:
                 self.tcp_server.protocol = self.protocol_var.get()
                 self.tcp_server.csv_header_sent.clear()  # Reset header tracking for CSV
+
+    def on_simple_streaming_toggle(self):
+        """Handle simple streaming mode toggle"""
+        if self.streaming:
+            simple_mode = self.simple_streaming_var.get()
+            self.log(f"Simple Streaming: {'Enabled' if simple_mode else 'Disabled'}")
+            if self.tcp_server:
+                self.tcp_server.simple_streaming = simple_mode
         
     def setup_data_items_section(self, parent):
         """Setup data items configuration section"""
@@ -514,13 +549,14 @@ class MachineDataSimulatorApp:
             host = self.host_var.get()
             port = int(self.port_var.get())
             protocol = self.protocol_var.get()
+            simple_streaming = self.simple_streaming_var.get()
             self.update_interval = float(self.interval_var.get())
-            
+
             if self.update_interval <= 0:
                 raise ValueError("Update interval must be positive")
-            
+
             # Create and start TCP server
-            self.tcp_server = TCPStreamServer(host, port, protocol)
+            self.tcp_server = TCPStreamServer(host, port, protocol, simple_streaming)
             self.tcp_server.start()
             
             # Start streaming thread
