@@ -1,5 +1,7 @@
-# No external dependencies required
-# This project uses only Python standard library modules:
+# External dependencies
+paho-mqtt>=1.6.0
+
+# Python standard library modules used:
 # - tkinter (GUI)
 # - socket (TCP networking)
 # - threading (concurrent operations)
