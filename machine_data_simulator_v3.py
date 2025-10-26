@@ -357,9 +357,10 @@ class MQTTSubscriber:
 class SimpleMQTTBroker:
     """Simple MQTT broker that receives and displays PUBLISH messages"""
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 1883):
+    def __init__(self, host: str = "0.0.0.0", port: int = 1883, topic_filter: str = "#"):
         self.host = host
         self.port = port
+        self.topic_filter = topic_filter
         self.server_socket = None
         self.clients = []
         self.running = False
@@ -472,6 +473,29 @@ class SimpleMQTTBroker:
             if self.log_callback:
                 self.log_callback(f"MQTT Broker: Error sending CONNACK: {e}")
 
+    def _topic_matches_filter(self, topic: str, topic_filter: str) -> bool:
+        """Check if topic matches the MQTT topic filter (supports wildcards)"""
+        if topic_filter == "#":
+            return True
+
+        topic_parts = topic.split('/')
+        filter_parts = topic_filter.split('/')
+
+        for i, filter_part in enumerate(filter_parts):
+            if filter_part == "#":
+                return True  # Multi-level wildcard matches everything after
+
+            if i >= len(topic_parts):
+                return False
+
+            if filter_part == "+":
+                continue  # Single-level wildcard matches one level
+
+            if filter_part != topic_parts[i]:
+                return False
+
+        return len(topic_parts) == len(filter_parts)
+
     def _handle_publish(self, client_socket, payload, flags):
         """Handle MQTT PUBLISH message"""
         try:
@@ -480,6 +504,10 @@ class SimpleMQTTBroker:
             # Parse topic
             topic_len = struct.unpack('>H', payload[0:2])[0]
             topic = payload[2:2+topic_len].decode('utf-8')
+
+            # Check if topic matches filter
+            if not self._topic_matches_filter(topic, self.topic_filter):
+                return  # Ignore messages that don't match filter
 
             # Get message (skip packet identifier if QoS > 0)
             if qos > 0:
@@ -559,8 +587,10 @@ class MachineDataSimulatorApp:
         self.update_interval = 1.0  # seconds
         self.last_message = ""  # Store last message for preview
         self.simple_streaming = False  # Simple streaming mode flag
+        self.config_file = "simulator_config.json"
 
         self.setup_ui()
+        self.load_configuration()
         
     def setup_ui(self):
         """Setup the user interface"""
@@ -775,17 +805,23 @@ class MachineDataSimulatorApp:
         self.mqtt_port_var = tk.StringVar(value="1883")
         ttk.Entry(mqtt_frame, textvariable=self.mqtt_port_var, width=10).grid(row=0, column=3, padx=5, pady=2)
 
-        # Row 1 - Start/Stop button and status
+        # Row 1 - Topic filter
+        ttk.Label(mqtt_frame, text="Topic Filter:").grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
+        self.mqtt_topic_filter_var = tk.StringVar(value="#")
+        topic_entry = ttk.Entry(mqtt_frame, textvariable=self.mqtt_topic_filter_var, width=30)
+        topic_entry.grid(row=1, column=1, columnspan=3, padx=5, pady=(5, 0), sticky=(tk.W, tk.E))
+
+        # Row 2 - Start/Stop button and status
         self.mqtt_button = ttk.Button(mqtt_frame, text="Start MQTT Broker", command=self.toggle_mqtt)
-        self.mqtt_button.grid(row=1, column=0, columnspan=2, pady=(10, 0), sticky=tk.W)
+        self.mqtt_button.grid(row=2, column=0, columnspan=2, pady=(10, 0), sticky=tk.W)
 
         # Status
         self.mqtt_status_var = tk.StringVar(value="MQTT Broker: Stopped")
-        ttk.Label(mqtt_frame, textvariable=self.mqtt_status_var, foreground="red").grid(row=1, column=2, columnspan=2, pady=(10, 0), sticky=tk.W, padx=(10, 0))
+        ttk.Label(mqtt_frame, textvariable=self.mqtt_status_var, foreground="red").grid(row=2, column=2, columnspan=2, pady=(10, 0), sticky=tk.W, padx=(10, 0))
 
         # Connected clients count
         self.mqtt_clients_var = tk.StringVar(value="MQTT Clients: 0")
-        ttk.Label(mqtt_frame, textvariable=self.mqtt_clients_var).grid(row=2, column=0, columnspan=4, pady=(5, 0), sticky=tk.W)
+        ttk.Label(mqtt_frame, textvariable=self.mqtt_clients_var).grid(row=3, column=0, columnspan=4, pady=(5, 0), sticky=tk.W)
 
     def setup_mqtt_messages(self, parent):
         """Setup MQTT messages display section"""
@@ -842,8 +878,9 @@ class MachineDataSimulatorApp:
         try:
             host = self.mqtt_host_var.get()
             port = int(self.mqtt_port_var.get())
+            topic_filter = self.mqtt_topic_filter_var.get()
 
-            self.mqtt_broker = SimpleMQTTBroker(host, port)
+            self.mqtt_broker = SimpleMQTTBroker(host, port, topic_filter)
             success = self.mqtt_broker.start(
                 message_callback=lambda t, p: self.root.after(0, self.on_mqtt_message_received, t, p),
                 log_callback=lambda msg: self.root.after(0, self.log, msg)
@@ -937,9 +974,12 @@ class MachineDataSimulatorApp:
             
             # Add to treeview
             self.items_tree.insert("", tk.END, values=(name, gen_type, min_val, max_val, "-"))
-            
+
             self.log(f"Added data item: {name} ({gen_type})")
-            
+
+            # Save configuration
+            self.save_configuration()
+
             # Clear input fields
             self.item_name_var.set("")
             
@@ -962,8 +1002,12 @@ class MachineDataSimulatorApp:
             
             # Remove from treeview
             self.items_tree.delete(item_id)
-            
+
             self.log(f"Removed data item: {name}")
+
+        # Save configuration after removing items
+        if selection:
+            self.save_configuration()
             
     def toggle_streaming(self):
         """Toggle streaming on/off"""
@@ -1072,8 +1116,82 @@ class MachineDataSimulatorApp:
             self.clients_var.set(f"Connected Clients: {count}")
             self.root.after(1000, self.update_client_count)
             
+    def save_configuration(self):
+        """Save current configuration to file"""
+        try:
+            config = {
+                "tcp_server": {
+                    "host": self.host_var.get(),
+                    "port": self.port_var.get(),
+                    "update_interval": self.interval_var.get(),
+                    "protocol": self.protocol_var.get(),
+                    "simple_streaming": self.simple_streaming_var.get(),
+                    "machine_id": self.machine_id_var.get()
+                },
+                "mqtt_broker": {
+                    "host": self.mqtt_host_var.get(),
+                    "port": self.mqtt_port_var.get(),
+                    "topic_filter": self.mqtt_topic_filter_var.get()
+                },
+                "data_items": [item.to_dict() for item in self.data_items]
+            }
+
+            with open(self.config_file, 'w') as f:
+                json.dump(config, f, indent=2)
+
+        except Exception as e:
+            self.log(f"Failed to save configuration: {e}")
+
+    def load_configuration(self):
+        """Load configuration from file"""
+        try:
+            with open(self.config_file, 'r') as f:
+                config = json.load(f)
+
+            # Load TCP server settings
+            if "tcp_server" in config:
+                tcp = config["tcp_server"]
+                self.host_var.set(tcp.get("host", "127.0.0.1"))
+                self.port_var.set(tcp.get("port", "5000"))
+                self.interval_var.set(tcp.get("update_interval", "1.0"))
+                self.protocol_var.set(tcp.get("protocol", "json"))
+                self.simple_streaming_var.set(tcp.get("simple_streaming", False))
+                self.machine_id_var.set(tcp.get("machine_id", "SIMULATOR-001"))
+
+            # Load MQTT broker settings
+            if "mqtt_broker" in config:
+                mqtt = config["mqtt_broker"]
+                self.mqtt_host_var.set(mqtt.get("host", "0.0.0.0"))
+                self.mqtt_port_var.set(mqtt.get("port", "1883"))
+                self.mqtt_topic_filter_var.set(mqtt.get("topic_filter", "#"))
+
+            # Load data items
+            if "data_items" in config:
+                for item_data in config["data_items"]:
+                    try:
+                        item = DataItem.from_dict(item_data)
+                        self.data_items.append(item)
+                        # Add to treeview
+                        self.items_tree.insert("", tk.END, values=(
+                            item.name,
+                            item.generation_type,
+                            item.min_val,
+                            item.max_val,
+                            "-"
+                        ))
+                    except Exception as e:
+                        self.log(f"Failed to load data item: {e}")
+
+            self.log("Configuration loaded successfully")
+
+        except FileNotFoundError:
+            self.log("No saved configuration found, using defaults")
+        except Exception as e:
+            self.log(f"Failed to load configuration: {e}")
+
     def on_closing(self):
         """Handle window closing"""
+        self.save_configuration()
         if self.streaming:
             self.stop_streaming()
         if self.mqtt_running:

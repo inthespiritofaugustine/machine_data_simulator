@@ -39,3 +39,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Simulator configuration
+simulator_config.json

@@ -42,6 +42,19 @@ pip install -r requirements.txt
 
 **Note**: The embedded MQTT broker uses Python's standard library (socket, struct, threading), so paho-mqtt is only needed if you plan to extend the simulator with MQTT client features.
 
+## Configuration Persistence
+
+The simulator automatically saves your configuration to `simulator_config.json` when:
+- You add or remove data items
+- You close the application
+
+On startup, the simulator automatically loads the last saved configuration, including:
+- TCP server settings (host, port, interval, protocol, machine ID)
+- MQTT broker settings (bind address, port, topic filter)
+- All configured data items with their generation types and parameters
+
+This saves time by restoring your previous setup automatically!
+
 ## Usage
 
 ### Starting the Simulator
@@ -82,10 +95,16 @@ chmod +x machine_data_simulator_v3.py
 1. **MQTT Broker Configuration**:
    - **Bind Address**: IP address to bind the broker to (default: 0.0.0.0 for all interfaces)
    - **Port**: MQTT broker port (default: 1883)
+   - **Topic Filter**: Filter which topics to display (default: # for all topics)
+     - Use `#` to receive all topics
+     - Use `sensor/#` to receive all topics under sensor/
+     - Use `sensor/+/data` to receive sensor/*/data (+ matches one level)
+     - Use specific topic like `device/temperature`
 
 2. **Starting the MQTT Broker**:
    - Click "Start MQTT Broker" to begin accepting MQTT connections
    - The broker will receive and display PUBLISH messages from any client
+   - Only messages matching the topic filter will be displayed
    - Received messages appear in the "MQTT Received Messages" window
    - Shows connected MQTT client count
    - Click "Stop MQTT Broker" to stop
