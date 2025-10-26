@@ -1,0 +1,621 @@
+#!/usr/bin/env python3
+"""
+Machine Data Simulator with UI
+Simulates streaming machine data over TCP with configurable data items
+"""
+
+import tkinter as tk
+from tkinter import ttk, messagebox, scrolledtext
+import socket
+import threading
+import json
+import time
+import random
+from datetime import datetime
+from typing import Dict, List, Any
+import math
+
+
+class DataItem:
+    """Represents a single data item with auto-generation capabilities"""
+    
+    GENERATION_TYPES = [
+        "Random Integer",
+        "Random Float",
+        "Sine Wave",
+        "Counter",
+        "Boolean Toggle",
+        "Random Choice"
+    ]
+    
+    def __init__(self, name: str, generation_type: str, min_val: float = 0, 
+                 max_val: float = 100, choices: List[str] = None):
+        self.name = name
+        self.generation_type = generation_type
+        self.min_val = min_val
+        self.max_val = max_val
+        self.choices = choices or ["ON", "OFF"]
+        self.counter = 0
+        self.sine_offset = random.uniform(0, 2 * math.pi)
+        
+    def generate_value(self) -> Any:
+        """Generate a value based on the generation type"""
+        if self.generation_type == "Random Integer":
+            return random.randint(int(self.min_val), int(self.max_val))
+        
+        elif self.generation_type == "Random Float":
+            return round(random.uniform(self.min_val, self.max_val), 2)
+        
+        elif self.generation_type == "Sine Wave":
+            # Create a sine wave that oscillates between min and max
+            amplitude = (self.max_val - self.min_val) / 2
+            offset = (self.max_val + self.min_val) / 2
+            value = offset + amplitude * math.sin(self.counter * 0.1 + self.sine_offset)
+            self.counter += 1
+            return round(value, 2)
+        
+        elif self.generation_type == "Counter":
+            value = int(self.min_val + self.counter)
+            self.counter = (self.counter + 1) % int(self.max_val - self.min_val + 1)
+            return value
+        
+        elif self.generation_type == "Boolean Toggle":
+            value = self.counter % 2 == 0
+            self.counter += 1
+            return value
+        
+        elif self.generation_type == "Random Choice":
+            return random.choice(self.choices)
+        
+        return None
+    
+    def to_dict(self) -> Dict:
+        """Convert to dictionary for serialization"""
+        return {
+            "name": self.name,
+            "generation_type": self.generation_type,
+            "min_val": self.min_val,
+            "max_val": self.max_val,
+            "choices": self.choices
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'DataItem':
+        """Create DataItem from dictionary"""
+        return cls(
+            name=data["name"],
+            generation_type=data["generation_type"],
+            min_val=data.get("min_val", 0),
+            max_val=data.get("max_val", 100),
+            choices=data.get("choices", ["ON", "OFF"])
+        )
+
+
+class TCPStreamServer:
+    """TCP server that streams data to connected clients"""
+    
+    def __init__(self, host: str = "0.0.0.0", port: int = 5000, protocol: str = "json"):
+        self.host = host
+        self.port = port
+        self.protocol = protocol
+        self.server_socket = None
+        self.clients = []
+        self.running = False
+        self.server_thread = None
+        self.lock = threading.Lock()
+        self.csv_header_sent = {}
+        
+    def start(self):
+        """Start the TCP server"""
+        try:
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_socket.bind((self.host, self.port))
+            self.server_socket.listen(5)
+            self.server_socket.settimeout(1.0)  # Allow periodic checking
+            self.running = True
+            
+            self.server_thread = threading.Thread(target=self._accept_connections, daemon=True)
+            self.server_thread.start()
+            
+            return True
+        except Exception as e:
+            raise Exception(f"Failed to start server: {e}")
+    
+    def _accept_connections(self):
+        """Accept incoming client connections"""
+        while self.running:
+            try:
+                client_socket, address = self.server_socket.accept()
+                with self.lock:
+                    self.clients.append((client_socket, address))
+                print(f"Client connected from {address}")
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if self.running:
+                    print(f"Error accepting connection: {e}")
+    
+    def broadcast(self, data: Dict):
+        """Broadcast data to all connected clients"""
+        # Format message based on protocol
+        if self.protocol == "csv":
+            message = self._format_csv(data)
+        else:  # json
+            message = json.dumps(data) + "\n"
+        
+        # If no clients, just return the message for preview
+        if not self.clients:
+            return message
+        
+        encoded_message = message.encode('utf-8')
+        
+        with self.lock:
+            disconnected = []
+            for client_socket, address in self.clients:
+                try:
+                    # Send CSV header if this is a new client and protocol is CSV
+                    if self.protocol == "csv" and address not in self.csv_header_sent:
+                        header = self._get_csv_header(data)
+                        client_socket.sendall(header.encode('utf-8'))
+                        self.csv_header_sent[address] = True
+                    
+                    client_socket.sendall(encoded_message)
+                except Exception as e:
+                    print(f"Error sending to {address}: {e}")
+                    disconnected.append((client_socket, address))
+            
+            # Remove disconnected clients
+            for client in disconnected:
+                self.clients.remove(client)
+                if client[1] in self.csv_header_sent:
+                    del self.csv_header_sent[client[1]]
+                client[0].close()
+        
+        return message  # Return formatted message for preview
+    
+    def _get_csv_header(self, data: Dict) -> str:
+        """Generate CSV header from data structure"""
+        headers = ["timestamp", "machine_id"]
+        if "data" in data:
+            headers.extend(sorted(data["data"].keys()))
+        return ",".join(headers) + "\n"
+    
+    def _format_csv(self, data: Dict) -> str:
+        """Format data as CSV"""
+        values = [
+            data.get("timestamp", ""),
+            data.get("machine_id", "")
+        ]
+        
+        if "data" in data:
+            # Sort keys to ensure consistent column order
+            for key in sorted(data["data"].keys()):
+                value = data["data"][key]
+                # Handle boolean and string values
+                if isinstance(value, bool):
+                    values.append(str(value).lower())
+                elif isinstance(value, str):
+                    # Escape commas in strings
+                    values.append(f'"{value}"' if ',' in value else value)
+                else:
+                    values.append(str(value))
+        
+        return ",".join(values) + "\n"
+    
+    def stop(self):
+        """Stop the TCP server"""
+        self.running = False
+        
+        # Close all client connections
+        with self.lock:
+            for client_socket, _ in self.clients:
+                try:
+                    client_socket.close()
+                except:
+                    pass
+            self.clients.clear()
+            self.csv_header_sent.clear()
+        
+        # Close server socket
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except:
+                pass
+    
+    def get_client_count(self) -> int:
+        """Get number of connected clients"""
+        with self.lock:
+            return len(self.clients)
+
+
+class MachineDataSimulatorApp:
+    """Main application with UI"""
+    
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Machine Data Simulator")
+        self.root.geometry("900x750")
+        
+        self.data_items: List[DataItem] = []
+        self.tcp_server = None
+        self.streaming = False
+        self.stream_thread = None
+        self.update_interval = 1.0  # seconds
+        self.last_message = ""  # Store last message for preview
+        
+        self.setup_ui()
+        
+    def setup_ui(self):
+        """Setup the user interface"""
+        # Main container
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # Configure grid weights
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(2, weight=1)
+        main_frame.rowconfigure(3, weight=1)
+        
+        # Server Configuration Section
+        self.setup_server_config(main_frame)
+        
+        # Data Items Section
+        self.setup_data_items_section(main_frame)
+        
+        # Output Preview Section
+        self.setup_output_preview(main_frame)
+        
+        # Log Section
+        self.setup_log_section(main_frame)
+        
+    def setup_server_config(self, parent):
+        """Setup server configuration section"""
+        config_frame = ttk.LabelFrame(parent, text="Server Configuration", padding="10")
+        config_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        # Row 0 - Connection settings
+        # Host
+        ttk.Label(config_frame, text="Host:").grid(row=0, column=0, sticky=tk.W)
+        self.host_var = tk.StringVar(value="127.0.0.1")
+        ttk.Entry(config_frame, textvariable=self.host_var, width=15).grid(row=0, column=1, padx=5)
+        
+        # Port
+        ttk.Label(config_frame, text="Port:").grid(row=0, column=2, sticky=tk.W, padx=(20, 0))
+        self.port_var = tk.StringVar(value="5000")
+        ttk.Entry(config_frame, textvariable=self.port_var, width=10).grid(row=0, column=3, padx=5)
+        
+        # Update Interval
+        ttk.Label(config_frame, text="Update Interval (s):").grid(row=0, column=4, sticky=tk.W, padx=(20, 0))
+        self.interval_var = tk.StringVar(value="1.0")
+        ttk.Entry(config_frame, textvariable=self.interval_var, width=10).grid(row=0, column=5, padx=5)
+        
+        # Protocol Selection
+        ttk.Label(config_frame, text="Protocol:").grid(row=0, column=6, sticky=tk.W, padx=(20, 0))
+        self.protocol_var = tk.StringVar(value="json")
+        protocol_combo = ttk.Combobox(config_frame, textvariable=self.protocol_var, 
+                                       values=["json", "csv"], width=8, state="readonly")
+        protocol_combo.grid(row=0, column=7, padx=5)
+        protocol_combo.bind('<<ComboboxSelected>>', self.on_protocol_change)
+        
+        # Start/Stop Button
+        self.start_button = ttk.Button(config_frame, text="Start Streaming", command=self.toggle_streaming)
+        self.start_button.grid(row=0, column=8, padx=(20, 0))
+        
+        # Row 1 - Machine ID
+        ttk.Label(config_frame, text="Machine ID:").grid(row=1, column=0, sticky=tk.W, pady=(10, 0))
+        self.machine_id_var = tk.StringVar(value="SIMULATOR-001")
+        ttk.Entry(config_frame, textvariable=self.machine_id_var, width=20).grid(row=1, column=1, columnspan=2, padx=5, pady=(10, 0), sticky=tk.W)
+        
+        # Status Label
+        self.status_var = tk.StringVar(value="Status: Stopped")
+        ttk.Label(config_frame, textvariable=self.status_var, foreground="red").grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
+        
+        # Clients Label
+        self.clients_var = tk.StringVar(value="Connected Clients: 0")
+        ttk.Label(config_frame, textvariable=self.clients_var).grid(row=2, column=4, columnspan=5, sticky=tk.W, pady=(5, 0))
+    
+    def on_protocol_change(self, event=None):
+        """Handle protocol change"""
+        if self.streaming:
+            self.log(f"Protocol changed to: {self.protocol_var.get().upper()}")
+            if self.tcp_server:
+                self.tcp_server.protocol = self.protocol_var.get()
+                self.tcp_server.csv_header_sent.clear()  # Reset header tracking for CSV
+        
+    def setup_data_items_section(self, parent):
+        """Setup data items configuration section"""
+        items_frame = ttk.LabelFrame(parent, text="Data Items", padding="10")
+        items_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        items_frame.columnconfigure(0, weight=1)
+        items_frame.rowconfigure(1, weight=1)
+        
+        # Add item controls
+        add_frame = ttk.Frame(items_frame)
+        add_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        ttk.Label(add_frame, text="Name:").grid(row=0, column=0, sticky=tk.W)
+        self.item_name_var = tk.StringVar()
+        ttk.Entry(add_frame, textvariable=self.item_name_var, width=15).grid(row=0, column=1, padx=5)
+        
+        ttk.Label(add_frame, text="Type:").grid(row=0, column=2, sticky=tk.W, padx=(10, 0))
+        self.item_type_var = tk.StringVar()
+        type_combo = ttk.Combobox(add_frame, textvariable=self.item_type_var, 
+                                   values=DataItem.GENERATION_TYPES, width=15, state="readonly")
+        type_combo.grid(row=0, column=3, padx=5)
+        type_combo.current(0)
+        
+        ttk.Label(add_frame, text="Min:").grid(row=0, column=4, sticky=tk.W, padx=(10, 0))
+        self.item_min_var = tk.StringVar(value="0")
+        ttk.Entry(add_frame, textvariable=self.item_min_var, width=8).grid(row=0, column=5, padx=5)
+        
+        ttk.Label(add_frame, text="Max:").grid(row=0, column=6, sticky=tk.W)
+        self.item_max_var = tk.StringVar(value="100")
+        ttk.Entry(add_frame, textvariable=self.item_max_var, width=8).grid(row=0, column=7, padx=5)
+        
+        ttk.Button(add_frame, text="Add Item", command=self.add_data_item).grid(row=0, column=8, padx=(10, 0))
+        
+        # Items list
+        list_frame = ttk.Frame(items_frame)
+        list_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+        
+        # Treeview for data items
+        columns = ("name", "type", "min", "max", "current_value")
+        self.items_tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=8)
+        
+        self.items_tree.heading("name", text="Name")
+        self.items_tree.heading("type", text="Generation Type")
+        self.items_tree.heading("min", text="Min")
+        self.items_tree.heading("max", text="Max")
+        self.items_tree.heading("current_value", text="Current Value")
+        
+        self.items_tree.column("name", width=120)
+        self.items_tree.column("type", width=150)
+        self.items_tree.column("min", width=80)
+        self.items_tree.column("max", width=80)
+        self.items_tree.column("current_value", width=120)
+        
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.items_tree.yview)
+        self.items_tree.configure(yscrollcommand=scrollbar.set)
+        
+        self.items_tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        
+        # Remove button
+        ttk.Button(items_frame, text="Remove Selected", command=self.remove_data_item).grid(row=2, column=0, sticky=tk.W, pady=(5, 0))
+    
+    def setup_output_preview(self, parent):
+        """Setup output preview section"""
+        preview_frame = ttk.LabelFrame(parent, text="Output Preview (Last Streamed Message)", padding="10")
+        preview_frame.grid(row=2, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        preview_frame.columnconfigure(0, weight=1)
+        preview_frame.rowconfigure(0, weight=1)
+        
+        self.preview_text = scrolledtext.ScrolledText(preview_frame, height=6, state='disabled', 
+                                                       wrap=tk.WORD, font=('Courier', 9))
+        self.preview_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+    def setup_log_section(self, parent):
+        """Setup log display section"""
+        log_frame = ttk.LabelFrame(parent, text="Activity Log", padding="10")
+        log_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        log_frame.columnconfigure(0, weight=1)
+        log_frame.rowconfigure(0, weight=1)
+        
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=6, state='disabled', wrap=tk.WORD)
+        self.log_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        ttk.Button(log_frame, text="Clear Log", command=self.clear_log).grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
+        
+    def log(self, message: str):
+        """Add message to log"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.log_text.configure(state='normal')
+        self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
+        self.log_text.see(tk.END)
+        self.log_text.configure(state='disabled')
+        
+    def clear_log(self):
+        """Clear the log"""
+        self.log_text.configure(state='normal')
+        self.log_text.delete(1.0, tk.END)
+        self.log_text.configure(state='disabled')
+    
+    def update_preview(self, message: str):
+        """Update the output preview with the latest message"""
+        self.preview_text.configure(state='normal')
+        self.preview_text.delete(1.0, tk.END)
+        
+        # For CSV, show header + message for clarity
+        if self.tcp_server and self.tcp_server.protocol == "csv":
+            # Generate and show header
+            if hasattr(self, 'last_csv_header'):
+                self.preview_text.insert(1.0, self.last_csv_header + "\n" + message)
+            else:
+                self.preview_text.insert(1.0, message)
+        else:
+            self.preview_text.insert(1.0, message)
+        
+        self.preview_text.configure(state='disabled')
+        
+    def add_data_item(self):
+        """Add a new data item"""
+        name = self.item_name_var.get().strip()
+        if not name:
+            messagebox.showerror("Error", "Please enter a name for the data item")
+            return
+        
+        # Check for duplicate names
+        if any(item.name == name for item in self.data_items):
+            messagebox.showerror("Error", f"Data item '{name}' already exists")
+            return
+        
+        try:
+            gen_type = self.item_type_var.get()
+            min_val = float(self.item_min_var.get())
+            max_val = float(self.item_max_var.get())
+            
+            if min_val >= max_val:
+                messagebox.showerror("Error", "Min value must be less than Max value")
+                return
+            
+            item = DataItem(name, gen_type, min_val, max_val)
+            self.data_items.append(item)
+            
+            # Add to treeview
+            self.items_tree.insert("", tk.END, values=(name, gen_type, min_val, max_val, "-"))
+            
+            self.log(f"Added data item: {name} ({gen_type})")
+            
+            # Clear input fields
+            self.item_name_var.set("")
+            
+        except ValueError:
+            messagebox.showerror("Error", "Min and Max values must be numbers")
+            
+    def remove_data_item(self):
+        """Remove selected data item"""
+        selection = self.items_tree.selection()
+        if not selection:
+            messagebox.showwarning("Warning", "Please select a data item to remove")
+            return
+        
+        for item_id in selection:
+            values = self.items_tree.item(item_id, "values")
+            name = values[0]
+            
+            # Remove from data items list
+            self.data_items = [item for item in self.data_items if item.name != name]
+            
+            # Remove from treeview
+            self.items_tree.delete(item_id)
+            
+            self.log(f"Removed data item: {name}")
+            
+    def toggle_streaming(self):
+        """Toggle streaming on/off"""
+        if not self.streaming:
+            self.start_streaming()
+        else:
+            self.stop_streaming()
+            
+    def start_streaming(self):
+        """Start the TCP server and streaming"""
+        if not self.data_items:
+            messagebox.showerror("Error", "Please add at least one data item before starting")
+            return
+        
+        try:
+            host = self.host_var.get()
+            port = int(self.port_var.get())
+            protocol = self.protocol_var.get()
+            self.update_interval = float(self.interval_var.get())
+            
+            if self.update_interval <= 0:
+                raise ValueError("Update interval must be positive")
+            
+            # Create and start TCP server
+            self.tcp_server = TCPStreamServer(host, port, protocol)
+            self.tcp_server.start()
+            
+            # Start streaming thread
+            self.streaming = True
+            self.stream_thread = threading.Thread(target=self.stream_data, daemon=True)
+            self.stream_thread.start()
+            
+            # Update UI
+            self.start_button.configure(text="Stop Streaming")
+            self.status_var.set("Status: Running")
+            self.log(f"Started streaming on {host}:{port} using {protocol.upper()} protocol")
+            
+            # Start client count updater
+            self.update_client_count()
+            
+        except ValueError as e:
+            messagebox.showerror("Error", f"Invalid configuration: {e}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to start server: {e}")
+            
+    def stop_streaming(self):
+        """Stop streaming and TCP server"""
+        self.streaming = False
+        
+        if self.tcp_server:
+            self.tcp_server.stop()
+            self.tcp_server = None
+        
+        # Update UI
+        self.start_button.configure(text="Start Streaming")
+        self.status_var.set("Status: Stopped")
+        self.clients_var.set("Connected Clients: 0")
+        self.log("Stopped streaming")
+        
+    def stream_data(self):
+        """Stream data continuously"""
+        while self.streaming:
+            # Generate data payload
+            timestamp = datetime.now().isoformat()
+            data = {
+                "timestamp": timestamp,
+                "machine_id": self.machine_id_var.get(),
+                "data": {}
+            }
+            
+            # Generate values for all data items
+            for item in self.data_items:
+                value = item.generate_value()
+                data["data"][item.name] = value
+                
+                # Update treeview (in main thread)
+                self.root.after(0, self.update_item_value, item.name, value)
+            
+            # Broadcast to clients and get formatted message
+            if self.tcp_server:
+                # Store CSV header for preview if using CSV protocol
+                if self.tcp_server.protocol == "csv":
+                    self.last_csv_header = self.tcp_server._get_csv_header(data).rstrip('\n')
+                
+                message = self.tcp_server.broadcast(data)
+                # Update preview in main thread
+                if message:
+                    self.root.after(0, self.update_preview, message.rstrip('\n'))
+            
+            time.sleep(self.update_interval)
+            
+    def update_item_value(self, name: str, value: Any):
+        """Update current value in treeview"""
+        for item_id in self.items_tree.get_children():
+            values = list(self.items_tree.item(item_id, "values"))
+            if values[0] == name:
+                values[4] = str(value)
+                self.items_tree.item(item_id, values=values)
+                break
+                
+    def update_client_count(self):
+        """Update connected clients count"""
+        if self.streaming and self.tcp_server:
+            count = self.tcp_server.get_client_count()
+            self.clients_var.set(f"Connected Clients: {count}")
+            self.root.after(1000, self.update_client_count)
+            
+    def on_closing(self):
+        """Handle window closing"""
+        if self.streaming:
+            self.stop_streaming()
+        self.root.destroy()
+
+
+def main():
+    root = tk.Tk()
+    app = MachineDataSimulatorApp(root)
+    root.protocol("WM_DELETE_WINDOW", app.on_closing)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

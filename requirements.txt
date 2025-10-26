@@ -1,0 +1,9 @@
+# No external dependencies required
+# This project uses only Python standard library modules:
+# - tkinter (GUI)
+# - socket (TCP networking)
+# - threading (concurrent operations)
+# - json (data serialization)
+# - random (data generation)
+# - datetime (timestamps)
+# - math (sine wave calculations)
