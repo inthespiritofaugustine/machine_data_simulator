@@ -399,6 +399,8 @@ class SimpleMQTTBroker:
         while self.running:
             try:
                 client_socket, address = self.server_socket.accept()
+                client_socket.settimeout(60.0)  # 60 second timeout for recv operations
+
                 if self.log_callback:
                     self.log_callback(f"MQTT Broker: Client connected from {address}")
 
@@ -419,21 +421,56 @@ class SimpleMQTTBroker:
                 if self.running and self.log_callback:
                     self.log_callback(f"MQTT Broker: Error accepting connection: {e}")
 
+    def _decode_remaining_length(self, client_socket):
+        """Decode MQTT variable length field (up to 4 bytes)"""
+        multiplier = 1
+        value = 0
+        byte_count = 0
+
+        while True:
+            data = client_socket.recv(1)
+            if not data:
+                return None
+
+            byte = data[0]
+            value += (byte & 127) * multiplier
+            multiplier *= 128
+            byte_count += 1
+
+            if (byte & 128) == 0:
+                break
+
+            if byte_count >= 4:
+                raise ValueError("Remaining length exceeds 4 bytes")
+
+        return value
+
     def _handle_client(self, client_socket, address):
         """Handle MQTT messages from a connected client"""
         try:
             while self.running:
-                # Read MQTT fixed header (minimum 2 bytes)
-                header = client_socket.recv(2)
-                if not header or len(header) < 2:
+                # Read MQTT fixed header first byte
+                header_byte = client_socket.recv(1)
+                if not header_byte or len(header_byte) < 1:
                     break
 
-                msg_type = (header[0] >> 4) & 0x0F
-                remaining_length = header[1]
+                msg_type = (header_byte[0] >> 4) & 0x0F
+
+                # Decode variable-length remaining length field
+                remaining_length = self._decode_remaining_length(client_socket)
+                if remaining_length is None:
+                    break
 
                 # Read remaining message if any
                 if remaining_length > 0:
-                    payload = client_socket.recv(remaining_length)
+                    payload = b''
+                    bytes_to_read = remaining_length
+                    while bytes_to_read > 0:
+                        chunk = client_socket.recv(min(bytes_to_read, 4096))
+                        if not chunk:
+                            break
+                        payload += chunk
+                        bytes_to_read -= len(chunk)
                 else:
                     payload = b''
 
@@ -441,7 +478,7 @@ class SimpleMQTTBroker:
                 if msg_type == 1:  # CONNECT
                     self._handle_connect(client_socket, payload)
                 elif msg_type == 3:  # PUBLISH
-                    self._handle_publish(client_socket, payload, header[0])
+                    self._handle_publish(client_socket, payload, header_byte[0])
                 elif msg_type == 12:  # PINGREQ
                     self._handle_pingreq(client_socket)
                 elif msg_type == 14:  # DISCONNECT
