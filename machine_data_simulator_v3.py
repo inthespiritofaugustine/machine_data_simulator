@@ -576,7 +576,7 @@ class MachineDataSimulatorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Machine Data Simulator")
-        self.root.geometry("1200x950")
+        self.root.geometry("1920x1080")
 
         self.data_items: List[DataItem] = []
         self.tcp_server = None
@@ -745,7 +745,7 @@ class MachineDataSimulatorApp:
         
         # Treeview for data items
         columns = ("name", "type", "min", "max", "current_value")
-        self.items_tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=8)
+        self.items_tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=12)
         
         self.items_tree.heading("name", text="Name")
         self.items_tree.heading("type", text="Generation Type")
@@ -775,7 +775,7 @@ class MachineDataSimulatorApp:
         preview_frame.columnconfigure(0, weight=1)
         preview_frame.rowconfigure(0, weight=1)
         
-        self.preview_text = scrolledtext.ScrolledText(preview_frame, height=6, state='disabled', 
+        self.preview_text = scrolledtext.ScrolledText(preview_frame, height=8, state='disabled',
                                                        wrap=tk.WORD, font=('Courier', 9))
         self.preview_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
@@ -786,7 +786,7 @@ class MachineDataSimulatorApp:
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=6, state='disabled', wrap=tk.WORD)
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=8, state='disabled', wrap=tk.WORD)
         self.log_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         ttk.Button(log_frame, text="Clear Log", command=self.clear_log).grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
@@ -830,7 +830,7 @@ class MachineDataSimulatorApp:
         messages_frame.columnconfigure(0, weight=1)
         messages_frame.rowconfigure(0, weight=1)
 
-        self.mqtt_messages_text = scrolledtext.ScrolledText(messages_frame, height=15, state='disabled',
+        self.mqtt_messages_text = scrolledtext.ScrolledText(messages_frame, height=20, state='disabled',
                                                              wrap=tk.WORD, font=('Courier', 9))
         self.mqtt_messages_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
 
