@@ -359,7 +359,7 @@ class MachineDataSimulatorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Machine Data Simulator")
-        self.root.geometry("1100x900")
+        self.root.geometry("1200x950")
 
         self.data_items: List[DataItem] = []
         self.tcp_server = None
@@ -446,29 +446,29 @@ class MachineDataSimulatorApp:
         protocol_combo.grid(row=0, column=7, padx=5)
         protocol_combo.bind('<<ComboboxSelected>>', self.on_protocol_change)
 
+        # Row 1 - Machine ID and Simple Streaming
+        ttk.Label(config_frame, text="Machine ID:").grid(row=1, column=0, sticky=tk.W, pady=(10, 0))
+        self.machine_id_var = tk.StringVar(value="SIMULATOR-001")
+        ttk.Entry(config_frame, textvariable=self.machine_id_var, width=20).grid(row=1, column=1, columnspan=2, padx=5, pady=(10, 0), sticky=tk.W)
+
         # Simple Streaming Checkbox
         self.simple_streaming_var = tk.BooleanVar(value=False)
         simple_check = ttk.Checkbutton(config_frame, text="Simple Streaming",
                                         variable=self.simple_streaming_var,
                                         command=self.on_simple_streaming_toggle)
-        simple_check.grid(row=0, column=8, padx=(20, 0))
+        simple_check.grid(row=1, column=3, columnspan=2, padx=(20, 0), pady=(10, 0), sticky=tk.W)
 
         # Start/Stop Button
         self.start_button = ttk.Button(config_frame, text="Start Streaming", command=self.toggle_streaming)
-        self.start_button.grid(row=0, column=9, padx=(20, 0))
-        
-        # Row 1 - Machine ID
-        ttk.Label(config_frame, text="Machine ID:").grid(row=1, column=0, sticky=tk.W, pady=(10, 0))
-        self.machine_id_var = tk.StringVar(value="SIMULATOR-001")
-        ttk.Entry(config_frame, textvariable=self.machine_id_var, width=20).grid(row=1, column=1, columnspan=2, padx=5, pady=(10, 0), sticky=tk.W)
-        
+        self.start_button.grid(row=1, column=5, columnspan=2, padx=(20, 0), pady=(10, 0), sticky=tk.W)
+
         # Status Label
         self.status_var = tk.StringVar(value="Status: Stopped")
-        ttk.Label(config_frame, textvariable=self.status_var, foreground="red").grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
-        
+        ttk.Label(config_frame, textvariable=self.status_var, foreground="red").grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(5, 0))
+
         # Clients Label
         self.clients_var = tk.StringVar(value="Connected Clients: 0")
-        ttk.Label(config_frame, textvariable=self.clients_var).grid(row=2, column=4, columnspan=5, sticky=tk.W, pady=(5, 0))
+        ttk.Label(config_frame, textvariable=self.clients_var).grid(row=2, column=3, columnspan=5, sticky=tk.W, pady=(5, 0))
     
     def on_protocol_change(self, event=None):
         """Handle protocol change"""
