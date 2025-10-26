@@ -479,14 +479,32 @@ class SimpleMQTTBroker:
                     self._handle_connect(client_socket, payload)
                 elif msg_type == 3:  # PUBLISH
                     self._handle_publish(client_socket, payload, header_byte[0])
+                elif msg_type == 8:  # SUBSCRIBE
+                    self._handle_subscribe(client_socket, payload)
+                elif msg_type == 10:  # UNSUBSCRIBE
+                    self._handle_unsubscribe(client_socket, payload)
                 elif msg_type == 12:  # PINGREQ
                     self._handle_pingreq(client_socket)
                 elif msg_type == 14:  # DISCONNECT
+                    if self.log_callback:
+                        self.log_callback(f"MQTT Broker: Client {address} sent DISCONNECT")
                     break
+                else:
+                    if self.log_callback:
+                        self.log_callback(f"MQTT Broker: Unknown message type {msg_type} from {address}")
 
+        except socket.timeout:
+            if self.log_callback:
+                self.log_callback(f"MQTT Broker: Client {address} timed out")
+        except ConnectionResetError:
+            if self.log_callback:
+                self.log_callback(f"MQTT Broker: Client {address} connection reset")
+        except BrokenPipeError:
+            if self.log_callback:
+                self.log_callback(f"MQTT Broker: Client {address} broken pipe")
         except Exception as e:
             if self.log_callback:
-                self.log_callback(f"MQTT Broker: Client {address} error: {e}")
+                self.log_callback(f"MQTT Broker: Client {address} error: {type(e).__name__}: {e}")
         finally:
             try:
                 client_socket.close()
@@ -577,6 +595,45 @@ class SimpleMQTTBroker:
             client_socket.send(pingresp)
         except:
             pass
+
+    def _handle_subscribe(self, client_socket, payload):
+        """Handle MQTT SUBSCRIBE message"""
+        try:
+            # Extract packet identifier (first 2 bytes)
+            packet_id = struct.unpack('>H', payload[0:2])[0]
+
+            # Send SUBACK
+            # Fixed header: 0x90 (SUBACK)
+            # Remaining length: 3 (2 bytes packet ID + 1 byte return code)
+            # Variable header: packet ID (2 bytes)
+            # Payload: return code 0x00 (QoS 0 granted)
+            suback = struct.pack('>BBHB', 0x90, 0x03, packet_id, 0x00)
+            client_socket.send(suback)
+
+            if self.log_callback:
+                self.log_callback(f"MQTT Broker: SUBSCRIBE received, sent SUBACK (packet_id={packet_id})")
+        except Exception as e:
+            if self.log_callback:
+                self.log_callback(f"MQTT Broker: Error handling SUBSCRIBE: {e}")
+
+    def _handle_unsubscribe(self, client_socket, payload):
+        """Handle MQTT UNSUBSCRIBE message"""
+        try:
+            # Extract packet identifier (first 2 bytes)
+            packet_id = struct.unpack('>H', payload[0:2])[0]
+
+            # Send UNSUBACK
+            # Fixed header: 0xB0 (UNSUBACK)
+            # Remaining length: 2 (packet ID)
+            # Variable header: packet ID (2 bytes)
+            unsuback = struct.pack('>BBH', 0xB0, 0x02, packet_id)
+            client_socket.send(unsuback)
+
+            if self.log_callback:
+                self.log_callback(f"MQTT Broker: UNSUBSCRIBE received, sent UNSUBACK (packet_id={packet_id})")
+        except Exception as e:
+            if self.log_callback:
+                self.log_callback(f"MQTT Broker: Error handling UNSUBSCRIBE: {e}")
 
     def stop(self):
         """Stop the MQTT broker"""
