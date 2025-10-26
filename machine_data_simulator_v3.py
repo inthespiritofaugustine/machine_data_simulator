@@ -590,7 +590,8 @@ class MachineDataSimulatorApp:
         self.config_file = "simulator_config.json"
 
         self.setup_ui()
-        self.load_configuration()
+        # Load configuration after UI is set up so variables exist
+        self.root.after(100, self.load_configuration)
         
     def setup_ui(self):
         """Setup the user interface"""
@@ -788,8 +789,13 @@ class MachineDataSimulatorApp:
         
         self.log_text = scrolledtext.ScrolledText(log_frame, height=8, state='disabled', wrap=tk.WORD)
         self.log_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        
-        ttk.Button(log_frame, text="Clear Log", command=self.clear_log).grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
+
+        # Button frame for log controls
+        log_button_frame = ttk.Frame(log_frame)
+        log_button_frame.grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
+
+        ttk.Button(log_button_frame, text="Clear Log", command=self.clear_log).grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
+        ttk.Button(log_button_frame, text="Save Configuration", command=lambda: self.save_configuration(show_message=True)).grid(row=0, column=1, sticky=tk.W)
 
     def setup_mqtt_config(self, parent):
         """Setup MQTT broker configuration section"""
@@ -1116,7 +1122,7 @@ class MachineDataSimulatorApp:
             self.clients_var.set(f"Connected Clients: {count}")
             self.root.after(1000, self.update_client_count)
             
-    def save_configuration(self):
+    def save_configuration(self, show_message=False):
         """Save current configuration to file"""
         try:
             config = {
@@ -1138,6 +1144,9 @@ class MachineDataSimulatorApp:
 
             with open(self.config_file, 'w') as f:
                 json.dump(config, f, indent=2)
+
+            if show_message:
+                self.log("Configuration saved successfully")
 
         except Exception as e:
             self.log(f"Failed to save configuration: {e}")
