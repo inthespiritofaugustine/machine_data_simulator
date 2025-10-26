@@ -5,7 +5,7 @@ A Python-based TCP streaming simulator that generates and broadcasts machine sen
 ## Features
 
 - **TCP Streaming Server**: Streams data to multiple connected clients simultaneously
-- **MQTT Subscriber**: Connect to MQTT broker to receive feedback messages, creating a full data loop (Simulator → TCP → Edge Device → MQTT → Simulator)
+- **Embedded MQTT Broker**: Built-in MQTT broker receives messages from edge devices, creating a full data loop (Simulator → TCP → Edge Device → MQTT Broker → Simulator)
 - **Multiple Data Generation Types**:
   - Random Integer
   - Random Float
@@ -25,7 +25,7 @@ A Python-based TCP streaming simulator that generates and broadcasts machine sen
 
 - Python 3.6+
 - tkinter (usually included with Python)
-- paho-mqtt (for MQTT subscriber functionality)
+- paho-mqtt (optional - only needed if using external MQTT features)
 
 ## Installation
 
@@ -35,15 +35,12 @@ git clone <repository-url>
 cd litmus
 ```
 
-2. Install dependencies:
+2. Install dependencies (optional):
 ```bash
 pip install -r requirements.txt
 ```
 
-Or install manually:
-```bash
-pip install paho-mqtt
-```
+**Note**: The embedded MQTT broker uses Python's standard library (socket, struct, threading), so paho-mqtt is only needed if you plan to extend the simulator with MQTT client features.
 
 ## Usage
 
@@ -81,24 +78,30 @@ chmod +x machine_data_simulator_v3.py
    - Click "Start Streaming" to begin broadcasting data
    - Click "Stop Streaming" to halt transmission
 
-#### MQTT Subscriber Settings (Right Panel)
-1. **MQTT Configuration**:
-   - **Broker**: MQTT broker address (default: localhost)
+#### MQTT Broker Settings (Right Panel)
+1. **MQTT Broker Configuration**:
+   - **Bind Address**: IP address to bind the broker to (default: 0.0.0.0 for all interfaces)
    - **Port**: MQTT broker port (default: 1883)
-   - **Topic**: Topic to subscribe to (default: # for all topics)
 
-2. **Connecting to MQTT**:
-   - Click "Connect to MQTT" to start receiving messages
+2. **Starting the MQTT Broker**:
+   - Click "Start MQTT Broker" to begin accepting MQTT connections
+   - The broker will receive and display PUBLISH messages from any client
    - Received messages appear in the "MQTT Received Messages" window
-   - Click "Disconnect from MQTT" to stop
+   - Shows connected MQTT client count
+   - Click "Stop MQTT Broker" to stop
 
 #### Complete Loop Testing
-To test the full data loop (Simulator → TCP → Litmus Edge → MQTT → Simulator):
-1. Start TCP streaming from the simulator
-2. Configure your Litmus Edge device to connect to the TCP stream
-3. Set up Litmus Edge to publish processed data to MQTT
-4. Connect the simulator's MQTT subscriber to the same broker
-5. Watch the loop feedback in the MQTT messages window!
+To test the full data loop (Simulator → TCP → Litmus Edge → MQTT Broker → Simulator):
+1. **Start the MQTT Broker** in the simulator (right panel) - this will receive messages
+2. **Start TCP streaming** from the simulator (left panel) - this sends data
+3. Configure your **Litmus Edge device** to:
+   - Connect to the simulator's TCP stream (e.g., localhost:5000)
+   - Parse/process the incoming data
+   - Publish processed data to the simulator's MQTT broker (e.g., localhost:1883)
+4. Watch the **complete loop**:
+   - TCP data appears in "Output Preview"
+   - Processed MQTT messages appear in "MQTT Received Messages"
+   - See your data complete the full pipeline!
 
 ### Connecting Clients
 
@@ -125,6 +128,34 @@ while True:
 ```bash
 telnet localhost 5000
 ```
+
+### Publishing to the MQTT Broker
+
+The simulator's MQTT broker accepts connections on port 1883 (configurable). Any MQTT client can publish messages to it.
+
+**Using mosquitto_pub:**
+```bash
+mosquitto_pub -h localhost -p 1883 -t "sensor/data" -m '{"temperature": 25.5, "humidity": 60}'
+```
+
+**Using Python with paho-mqtt:**
+```python
+import paho.mqtt.client as mqtt
+import json
+
+client = mqtt.Client()
+client.connect("localhost", 1883, 60)
+
+data = {"temperature": 25.5, "humidity": 60}
+client.publish("sensor/data", json.dumps(data))
+client.disconnect()
+```
+
+**Edge Device Configuration:**
+Point your Litmus Edge device or any MQTT publisher to:
+- **Broker**: `<simulator-ip>` (e.g., localhost or 192.168.1.100)
+- **Port**: `1883` (or your configured port)
+- **Topic**: Any topic (all topics are received and displayed)
 
 ## Data Formats
 

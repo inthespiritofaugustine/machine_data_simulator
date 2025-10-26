@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Dict, List, Any
 import math
 import paho.mqtt.client as mqtt
+import struct
 
 
 class DataItem:
@@ -353,6 +354,194 @@ class MQTTSubscriber:
                 self.log_callback(f"MQTT: Subscription changed to '{self.topic}'")
 
 
+class SimpleMQTTBroker:
+    """Simple MQTT broker that receives and displays PUBLISH messages"""
+
+    def __init__(self, host: str = "0.0.0.0", port: int = 1883):
+        self.host = host
+        self.port = port
+        self.server_socket = None
+        self.clients = []
+        self.running = False
+        self.server_thread = None
+        self.lock = threading.Lock()
+        self.message_callback = None
+        self.log_callback = None
+
+    def start(self, message_callback=None, log_callback=None):
+        """Start the MQTT broker"""
+        try:
+            self.message_callback = message_callback
+            self.log_callback = log_callback
+
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_socket.bind((self.host, self.port))
+            self.server_socket.listen(5)
+            self.server_socket.settimeout(1.0)
+            self.running = True
+
+            self.server_thread = threading.Thread(target=self._accept_connections, daemon=True)
+            self.server_thread.start()
+
+            if self.log_callback:
+                self.log_callback(f"MQTT Broker: Started on {self.host}:{self.port}")
+
+            return True
+        except Exception as e:
+            if self.log_callback:
+                self.log_callback(f"MQTT Broker: Failed to start - {e}")
+            return False
+
+    def _accept_connections(self):
+        """Accept incoming MQTT client connections"""
+        while self.running:
+            try:
+                client_socket, address = self.server_socket.accept()
+                if self.log_callback:
+                    self.log_callback(f"MQTT Broker: Client connected from {address}")
+
+                # Start a thread to handle this client
+                client_thread = threading.Thread(
+                    target=self._handle_client,
+                    args=(client_socket, address),
+                    daemon=True
+                )
+                client_thread.start()
+
+                with self.lock:
+                    self.clients.append((client_socket, address))
+
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if self.running and self.log_callback:
+                    self.log_callback(f"MQTT Broker: Error accepting connection: {e}")
+
+    def _handle_client(self, client_socket, address):
+        """Handle MQTT messages from a connected client"""
+        try:
+            while self.running:
+                # Read MQTT fixed header (minimum 2 bytes)
+                header = client_socket.recv(2)
+                if not header or len(header) < 2:
+                    break
+
+                msg_type = (header[0] >> 4) & 0x0F
+                remaining_length = header[1]
+
+                # Read remaining message if any
+                if remaining_length > 0:
+                    payload = client_socket.recv(remaining_length)
+                else:
+                    payload = b''
+
+                # Handle different MQTT message types
+                if msg_type == 1:  # CONNECT
+                    self._handle_connect(client_socket, payload)
+                elif msg_type == 3:  # PUBLISH
+                    self._handle_publish(client_socket, payload, header[0])
+                elif msg_type == 12:  # PINGREQ
+                    self._handle_pingreq(client_socket)
+                elif msg_type == 14:  # DISCONNECT
+                    break
+
+        except Exception as e:
+            if self.log_callback:
+                self.log_callback(f"MQTT Broker: Client {address} error: {e}")
+        finally:
+            try:
+                client_socket.close()
+            except:
+                pass
+            with self.lock:
+                if (client_socket, address) in self.clients:
+                    self.clients.remove((client_socket, address))
+            if self.log_callback:
+                self.log_callback(f"MQTT Broker: Client {address} disconnected")
+
+    def _handle_connect(self, client_socket, payload):
+        """Handle MQTT CONNECT message"""
+        try:
+            # Send CONNACK (Connection Acknowledgment)
+            # Fixed header: 0x20 (CONNACK), 0x02 (remaining length)
+            # Variable header: 0x00 (session present), 0x00 (connection accepted)
+            connack = bytes([0x20, 0x02, 0x00, 0x00])
+            client_socket.send(connack)
+        except Exception as e:
+            if self.log_callback:
+                self.log_callback(f"MQTT Broker: Error sending CONNACK: {e}")
+
+    def _handle_publish(self, client_socket, payload, flags):
+        """Handle MQTT PUBLISH message"""
+        try:
+            qos = (flags >> 1) & 0x03
+
+            # Parse topic
+            topic_len = struct.unpack('>H', payload[0:2])[0]
+            topic = payload[2:2+topic_len].decode('utf-8')
+
+            # Get message (skip packet identifier if QoS > 0)
+            if qos > 0:
+                message_start = 2 + topic_len + 2
+            else:
+                message_start = 2 + topic_len
+
+            message_bytes = payload[message_start:]
+
+            # Try to decode as JSON, otherwise as string
+            try:
+                message = json.loads(message_bytes.decode('utf-8'))
+                formatted_message = json.dumps(message, indent=2)
+            except:
+                formatted_message = message_bytes.decode('utf-8', errors='replace')
+
+            # Call the message callback
+            if self.message_callback:
+                self.message_callback(topic, formatted_message)
+
+        except Exception as e:
+            if self.log_callback:
+                self.log_callback(f"MQTT Broker: Error handling PUBLISH: {e}")
+
+    def _handle_pingreq(self, client_socket):
+        """Handle MQTT PINGREQ message"""
+        try:
+            # Send PINGRESP
+            pingresp = bytes([0xD0, 0x00])
+            client_socket.send(pingresp)
+        except:
+            pass
+
+    def stop(self):
+        """Stop the MQTT broker"""
+        self.running = False
+
+        # Close all client connections
+        with self.lock:
+            for client_socket, _ in self.clients:
+                try:
+                    client_socket.close()
+                except:
+                    pass
+            self.clients.clear()
+
+        # Close server socket
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except:
+                pass
+
+        if self.log_callback:
+            self.log_callback("MQTT Broker: Stopped")
+
+    def get_client_count(self) -> int:
+        """Get number of connected MQTT clients"""
+        with self.lock:
+            return len(self.clients)
+
+
 class MachineDataSimulatorApp:
     """Main application with UI"""
 
@@ -363,9 +552,9 @@ class MachineDataSimulatorApp:
 
         self.data_items: List[DataItem] = []
         self.tcp_server = None
-        self.mqtt_subscriber = None
+        self.mqtt_broker = None
         self.streaming = False
-        self.mqtt_connected = False
+        self.mqtt_running = False
         self.stream_thread = None
         self.update_interval = 1.0  # seconds
         self.last_message = ""  # Store last message for preview
@@ -573,31 +762,30 @@ class MachineDataSimulatorApp:
         ttk.Button(log_frame, text="Clear Log", command=self.clear_log).grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
 
     def setup_mqtt_config(self, parent):
-        """Setup MQTT configuration section"""
-        mqtt_frame = ttk.LabelFrame(parent, text="MQTT Subscriber Configuration", padding="10")
+        """Setup MQTT broker configuration section"""
+        mqtt_frame = ttk.LabelFrame(parent, text="MQTT Broker (Receive Messages)", padding="10")
         mqtt_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
 
-        # Row 0 - Broker settings
-        ttk.Label(mqtt_frame, text="Broker:").grid(row=0, column=0, sticky=tk.W)
-        self.mqtt_broker_var = tk.StringVar(value="localhost")
-        ttk.Entry(mqtt_frame, textvariable=self.mqtt_broker_var, width=20).grid(row=0, column=1, padx=5, pady=2)
+        # Row 0 - Broker bind settings
+        ttk.Label(mqtt_frame, text="Bind Address:").grid(row=0, column=0, sticky=tk.W)
+        self.mqtt_host_var = tk.StringVar(value="0.0.0.0")
+        ttk.Entry(mqtt_frame, textvariable=self.mqtt_host_var, width=20).grid(row=0, column=1, padx=5, pady=2)
 
         ttk.Label(mqtt_frame, text="Port:").grid(row=0, column=2, sticky=tk.W, padx=(10, 0))
         self.mqtt_port_var = tk.StringVar(value="1883")
         ttk.Entry(mqtt_frame, textvariable=self.mqtt_port_var, width=10).grid(row=0, column=3, padx=5, pady=2)
 
-        # Row 1 - Topic
-        ttk.Label(mqtt_frame, text="Topic:").grid(row=1, column=0, sticky=tk.W)
-        self.mqtt_topic_var = tk.StringVar(value="#")
-        ttk.Entry(mqtt_frame, textvariable=self.mqtt_topic_var, width=30).grid(row=1, column=1, columnspan=3, padx=5, pady=2, sticky=(tk.W, tk.E))
-
-        # Row 2 - Connect/Disconnect button
-        self.mqtt_button = ttk.Button(mqtt_frame, text="Connect to MQTT", command=self.toggle_mqtt)
-        self.mqtt_button.grid(row=2, column=0, columnspan=2, pady=(10, 0), sticky=tk.W)
+        # Row 1 - Start/Stop button and status
+        self.mqtt_button = ttk.Button(mqtt_frame, text="Start MQTT Broker", command=self.toggle_mqtt)
+        self.mqtt_button.grid(row=1, column=0, columnspan=2, pady=(10, 0), sticky=tk.W)
 
         # Status
-        self.mqtt_status_var = tk.StringVar(value="MQTT Status: Disconnected")
-        ttk.Label(mqtt_frame, textvariable=self.mqtt_status_var, foreground="red").grid(row=2, column=2, columnspan=2, pady=(10, 0), sticky=tk.W, padx=(10, 0))
+        self.mqtt_status_var = tk.StringVar(value="MQTT Broker: Stopped")
+        ttk.Label(mqtt_frame, textvariable=self.mqtt_status_var, foreground="red").grid(row=1, column=2, columnspan=2, pady=(10, 0), sticky=tk.W, padx=(10, 0))
+
+        # Connected clients count
+        self.mqtt_clients_var = tk.StringVar(value="MQTT Clients: 0")
+        ttk.Label(mqtt_frame, textvariable=self.mqtt_clients_var).grid(row=2, column=0, columnspan=4, pady=(5, 0), sticky=tk.W)
 
     def setup_mqtt_messages(self, parent):
         """Setup MQTT messages display section"""
@@ -643,57 +831,68 @@ class MachineDataSimulatorApp:
         self.mqtt_messages_text.configure(state='disabled')
 
     def toggle_mqtt(self):
-        """Toggle MQTT connection"""
-        if not self.mqtt_connected:
-            self.connect_mqtt()
+        """Toggle MQTT broker"""
+        if not self.mqtt_running:
+            self.start_mqtt_broker()
         else:
-            self.disconnect_mqtt()
+            self.stop_mqtt_broker()
 
-    def connect_mqtt(self):
-        """Connect to MQTT broker"""
+    def start_mqtt_broker(self):
+        """Start the MQTT broker"""
         try:
-            broker = self.mqtt_broker_var.get()
+            host = self.mqtt_host_var.get()
             port = int(self.mqtt_port_var.get())
-            topic = self.mqtt_topic_var.get()
 
-            self.mqtt_subscriber = MQTTSubscriber(broker, port, topic)
-            success = self.mqtt_subscriber.start(
+            self.mqtt_broker = SimpleMQTTBroker(host, port)
+            success = self.mqtt_broker.start(
                 message_callback=lambda t, p: self.root.after(0, self.on_mqtt_message_received, t, p),
                 log_callback=lambda msg: self.root.after(0, self.log, msg)
             )
 
             if success:
-                self.mqtt_connected = True
-                self.mqtt_button.configure(text="Disconnect from MQTT")
-                self.mqtt_status_var.set("MQTT Status: Connected")
-                # Change status label color (we need to find and update the label widget)
+                self.mqtt_running = True
+                self.mqtt_button.configure(text="Stop MQTT Broker")
+                self.mqtt_status_var.set("MQTT Broker: Running")
+                # Change status label color
                 for widget in self.mqtt_button.master.winfo_children():
-                    if isinstance(widget, ttk.Label) and "MQTT Status:" in str(widget.cget("text") if hasattr(widget, "cget") else ""):
+                    if isinstance(widget, ttk.Label) and "MQTT Broker:" in str(widget.cget("text") if hasattr(widget, "cget") else ""):
                         try:
                             widget.configure(foreground="green")
                         except:
                             pass
+
+                # Start MQTT client count updater
+                self.update_mqtt_client_count()
+
         except ValueError:
             messagebox.showerror("Error", "Port must be a valid number")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to connect to MQTT broker: {e}")
+            messagebox.showerror("Error", f"Failed to start MQTT broker: {e}")
 
-    def disconnect_mqtt(self):
-        """Disconnect from MQTT broker"""
-        if self.mqtt_subscriber:
-            self.mqtt_subscriber.stop()
-            self.mqtt_subscriber = None
+    def stop_mqtt_broker(self):
+        """Stop the MQTT broker"""
+        if self.mqtt_broker:
+            self.mqtt_broker.stop()
+            self.mqtt_broker = None
 
-        self.mqtt_connected = False
-        self.mqtt_button.configure(text="Connect to MQTT")
-        self.mqtt_status_var.set("MQTT Status: Disconnected")
+        self.mqtt_running = False
+        self.mqtt_button.configure(text="Start MQTT Broker")
+        self.mqtt_status_var.set("MQTT Broker: Stopped")
+        self.mqtt_clients_var.set("MQTT Clients: 0")
         # Change status label color back to red
         for widget in self.mqtt_button.master.winfo_children():
-            if isinstance(widget, ttk.Label) and "MQTT Status:" in str(widget.cget("text") if hasattr(widget, "cget") else ""):
+            if isinstance(widget, ttk.Label) and "MQTT Broker:" in str(widget.cget("text") if hasattr(widget, "cget") else ""):
                 try:
                     widget.configure(foreground="red")
                 except:
                     pass
+
+    def update_mqtt_client_count(self):
+        """Update MQTT connected clients count"""
+        if self.mqtt_running and self.mqtt_broker:
+            count = self.mqtt_broker.get_client_count()
+            self.mqtt_clients_var.set(f"MQTT Clients: {count}")
+            self.root.after(1000, self.update_mqtt_client_count)
 
     def update_preview(self, message: str):
         """Update the output preview with the latest message"""
@@ -877,8 +1076,8 @@ class MachineDataSimulatorApp:
         """Handle window closing"""
         if self.streaming:
             self.stop_streaming()
-        if self.mqtt_connected:
-            self.disconnect_mqtt()
+        if self.mqtt_running:
+            self.stop_mqtt_broker()
         self.root.destroy()
 
 
